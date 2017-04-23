@@ -1,4 +1,4 @@
-Kickbot
+Telly-Kickbot
 ======
 
 A bot made to manage groups based on counterparty token holdings.

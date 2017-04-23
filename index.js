@@ -19,6 +19,7 @@ const colors = require('colors')
 const config = JSON.parse(fs.readFileSync('./config.json').toString('utf8').trim())
 const util = require('util')
 const moment = require('moment')
+const merge = require('merge')
 const bitcoin = require('bitcoinjs-lib')
 const bitcoinMessage = require('bitcoinjs-message')
 const crypto = require('crypto')
@@ -71,15 +72,21 @@ bot.getMe().then((data)=> {
   console.log(util.inspect(data, {colors: true, depth: 4}))
 })
 
+function removeUserGroup(uid, gid) {
+  sequelize.transaction(function (trans) {
+    return GroupUser.destroy({
+        where: {group_tid: gid, user_tid: uid},
+        transaction: trans
+      }).then(User.destroy({
+        where: {tid: uid},
+        transaction: trans
+      })).catch((err) => {
+        console.log('Error'.bgRed.yellow, err)
+      })
+    })
+}
+
 bot.on('message', (msg) => {
-  /*console.log(util.inspect(msg, {color: true, depth: 3}))
-  console.log('******************************'.rainbow)
-  console.log('******************************'.rainbow)
-  console.log('******************************'.rainbow)
-  console.log(msg.new_chat_member.id, 'vs.', ownId, ' => ', msg.new_chat_member.id !== ownId)
-  console.log('******************************'.rainbow)
-  console.log('******************************'.rainbow)
-  console.log('******************************'.rainbow)*/
   if (msg.new_chat_member && (msg.new_chat_member.id !== ownId)) {
     sequelize.transaction(function (trans) {
       return GroupUser.findOrCreate({
@@ -100,19 +107,8 @@ bot.on('message', (msg) => {
           console.log('Error'.bgRed.yellow, err)
         })
     })
-
   } else if (msg.left_chat_member) {
-    sequelize.transaction(function (trans) {
-      return GroupUser.destroy({
-          where: {group_tid: msg.chat.id, user_tid: msg.left_chat_member.id},
-          transaction: trans
-        }).then(User.destroy({
-          where: {tid: msg.left_chat_member.id},
-          transaction: trans
-        })).catch((err) => {
-          console.log('Error'.bgRed.yellow, err)
-        })
-      })
+    removeUserGroup(msg.left_chat_member.id, msg.chat.id)
   }
 
   if (msg.chat.id > 0) {
@@ -390,7 +386,10 @@ setInterval(() => {
     }
     return Promise.all(gets)
   }).then((usrGrps) => {
+    let users = []
     let gets = []
+    let orderedAssets = []
+    let assets = {}
 
     for (let i=0; i < usrGrps.length; i++) {
       let usr = usrGrps[i][0]
@@ -410,15 +409,24 @@ setInterval(() => {
         }
       } else {
         includeCheck(usr.address, usr.tid, grp.token, grp.tid, grp.min_hold)
-        gets.push(xcp.getUser(usr.address))
+        assets[grp.token] = true
+        users.push({address: usr.address, tid: usr.tid}) //xcp.getUser(usr.address))
       }
     }
 
+    for (let token in assets) {
+      gets.push(xcp.getAssetHolders(token))
+      orderedAssets.push(token)
+    }
+
+
     return Promise.all(gets)
   }).then((chckds) => {
-    for (let i=0; i < chckds.length; i++) {
-      for (let addr in chckds[i]) {
-        let bals = chckds[i][addr]
+    let holders = chckds.reduce((p, n) => merge(p, n), {})
+
+    for (let i=0; i < holders.length; i++) {
+      for (let addr in holders[i]) {
+        let bals = holders[i][addr]
         checkBals(addr, bals, addrToUid[addr])
       }
     }
@@ -427,7 +435,20 @@ setInterval(() => {
       let ban = bans[i]
       if (ban.uid != ownId) {
         bot.kickChatMember(ban.gid, ban.uid)
+        removeUserGroup(ban.uid, ban.gid)
       }
     }
   })
 }, 1000 * config.secondsVerify)
+
+function searchGroups() {
+  sequelize.transaction(function (trans) {
+    return Group.findAll({transaction: trans}).then((grps) => {
+        return Promise.all(grps.map(x => bot.getChat(x.tid)))
+      }).then((chats) => {
+        console.log(util.inspect(chats, {colors: true, depth: 4}))
+      }).catch((err) => {
+        console.log('Error'.bgRed.yellow, err)
+      })
+  })
+}

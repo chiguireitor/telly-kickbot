@@ -34,6 +34,29 @@ function getAsset(asset) {
   })
 }
 
+function getAssetHolders(asset) {
+  asset = asset.trim()
+  return new Promise((resolve,reject) => {
+    if (asset.length <= 12) {
+      getJSON(xcpAPI + 'holders/' + asset, function(error, response){
+        if (error) {
+          reject(error)
+        } else {
+          let holders = {}
+          response.data.forEach((holder) => {
+            let tb = {}
+            tb[asset] = parseFloat(holder.amount)
+            holders[holder.address] = tb
+          })
+          resolve(holders)
+        }
+      })
+    } else {
+      reject(new Error('Assets must be 12 characters or less'))
+    }
+  })
+}
+
 function getUserBalance(addr, asset) {
   asset = asset.trim()
   addr = addr.trim()
@@ -80,6 +103,7 @@ function getUser(addr) {
 
 module.exports = {
   getAsset,
+  getAssetHolders,
   getUserBalance,
   getUser
 }
