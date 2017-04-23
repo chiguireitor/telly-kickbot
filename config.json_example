@@ -1,0 +1,9 @@
+{
+  "token": "your token, create with @BotFather",
+  "sqlite": {
+    "dialect": "sqlite",
+    "storage": "path to your sqlite address, "
+  },
+  "secondsVerify": 30,
+  "maxSecondsWithoutVerify": 900
+}
