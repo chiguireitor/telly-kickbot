@@ -132,8 +132,8 @@ bot.onText(/\/help/, (msg, match) => {
     }).then(function(group) {
       bot.sendMessage(msg.chat.id, 'Issue /token to lock this group to a XCP token holding.'+
         '\nUse /required for minimum amount of token holded to be accepted.'+
-        ((msg.chat.type == 'supergroup')?'':'\nThe group needs to be a supergroup and the bot needs to be an admin to work.')+
-        '\nDue to limitation on the telegram client, this actions can only be performed on the mobile.')
+        ((msg.chat.type == 'supergroup')?'':'\nThe group needs to be a supergroup and the bot needs to be an admin to work.'+
+        '\nDue to limitation on the telegram client, this actions can only be performed on the mobile.'))
     })
   }
 })
@@ -355,7 +355,8 @@ setInterval(() => {
             if (grps[i].amnt > bals[token]) {
               bans.push({
                 gid: grps[i].gid,
-                uid
+                uid,
+                addr
               })
             }
           }
@@ -363,7 +364,8 @@ setInterval(() => {
           for (let i=0; i < grps.length; i++) {
             bans.push({
               gid: grps[i].gid,
-              uid
+              uid,
+              addr
             })
           }
         }
@@ -396,21 +398,24 @@ setInterval(() => {
       let grp = usrGrps[i][1]
       let grusr = usrGrps[i][2]
 
-      if (!usr.last_verify) {
-        let start = moment(Date.now())
-        let end = moment(grusr.join_date)
-        let diff = start.diff(end)
+      if  (usr) {
+        if (!usr.last_verify) {
+          let start = moment(Date.now())
+          let end = moment(grusr.join_date)
+          let diff = start.diff(end)
 
-        if (diff > config.maxSecondsWithoutVerify) {
-          bans.push({
-            gid: grp.tid,
-            uid: usr.tid
-          })
+          if (diff > (config.maxSecondsWithoutVerify * 1000)) {
+            bans.push({
+              gid: grp.tid,
+              uid: usr.tid,
+              addr: usr.address
+            })
+          }
+        } else {
+          includeCheck(usr.address, usr.tid, grp.token, grp.tid, grp.min_hold)
+          assets[grp.token] = true
+          users.push({address: usr.address, tid: usr.tid}) //xcp.getUser(usr.address))
         }
-      } else {
-        includeCheck(usr.address, usr.tid, grp.token, grp.tid, grp.min_hold)
-        assets[grp.token] = true
-        users.push({address: usr.address, tid: usr.tid}) //xcp.getUser(usr.address))
       }
     }
 
@@ -434,6 +439,7 @@ setInterval(() => {
     for (let i=0; i < bans.length; i++) {
       let ban = bans[i]
       if (ban.uid != ownId) {
+        console.log('KICK'.bgRed.yellow, ban.addr)
         bot.kickChatMember(ban.gid, ban.uid)
         removeUserGroup(ban.uid, ban.gid)
       }
