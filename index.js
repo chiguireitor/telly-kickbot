@@ -24,10 +24,13 @@ const bitcoin = require('bitcoinjs-lib')
 const bitcoinMessage = require('bitcoinjs-message')
 const crypto = require('crypto')
 const Sequelize = require('sequelize')
+const http = require('http')
+const urlparse = require('url-parse')
+const WebSocket = require('ws')
 const sequelize = new Sequelize('kickbot', '', '', config.sqlite)
 const xcp = require('./xcp.js')
-
-const ownId = parseInt(config.token.split(':')[0])
+const tgToken = process.env.TELEGRAM_TOKEN || config.token
+const ownId = parseInt(tgToken.split(':')[0])
 
 var User = sequelize.define('user', {
   tid: Sequelize.STRING,
@@ -58,7 +61,7 @@ User.sync()
 Group.sync()
 GroupUser.sync()
 
-const bot = new Tgfancy(config.token, {
+const bot = new Tgfancy(tgToken, {
   polling: true,
   tgfancy: {
       /*webSocket: {
@@ -274,53 +277,108 @@ bot.onText(/\/start/, (msg) => {
 })
 
 function randomString(cb) {
-  crypto.randomBytes(32, function(err, buffer) {
+  crypto.randomBytes(10, function(err, buffer) {
     if (err) {
       cb(err)
     } else {
-      cb(null, buffer.toString('base64'))
+      cb(null, buffer.toString('hex'))
     }
   })
 }
 
-function handleUserMessage(msg, user) {
-  if (!user.address) {
+var challengeWaits = {}
+var waitChallenge = function() {}
+
+if (config.wsAuthUrl) {
+  const ws = new WebSocket(config.wsAuthUrl)
+
+  ws.on('message', function incoming(data, flags) {
     try {
-      let addr = msg.text.trim()
-      bitcoin.address.fromBase58Check(addr)
+      let ob = JSON.parse(data)
 
-      randomString((err, s) => {
-        if (err) {
-          bot.sendMessage(msg.chat.id, 'There was an error generating the challenge. Try again later.')
-        } else {
-          user.address = msg.text.trim()
-          user.challenge = s
-          user.last_verify = 0
-          user.save().then(() => {
-            bot.sendMessage(msg.chat.id, "Now sign the following message and send the result to me.")
-            bot.sendMessage(msg.chat.id, user.challenge)
-          }).catch(() => {
-            bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
-          })
-
-        }
-      })
-    } catch(e) {
-      console.log(e)
-      bot.sendMessage(msg.chat.id, "First send me your address")
+      if ('verified' in ob) {
+        challengeWaits[ob.challenge](true)
+      }
+    } catch (e) {
+      console.log('Malformed data from websocket')
     }
+  })
+
+  waitChallenge = function(chall, cb) {
+    challengeWaits[chall] = cb
+
+    ws.send(JSON.stringify({
+      challenge: chall
+    }))
+  }
+}
+
+function handleUserMessage(msg, user) {
+  if (config.authUrl) {
+    randomString((err, s) => {
+      if (err) {
+        bot.sendMessage(msg.chat.id, 'There was an error generating the challenge. Try again later.')
+      } else {
+        user.address = msg.text.trim()
+        user.challenge = s
+        user.last_verify = 0
+        user.save().then(() => {
+          bot.sendMessage(msg.chat.id, "Go to the following link to verify your address.")
+          bot.sendMessage(msg.chat.id, "https://rarepepewallet.com/?msg=" + user.challenge + "&return=" + config.authUrl)
+          waitChallenge(user.challenge, (verified) => {
+            if (verified) {
+              user.last_verify = Date.now()
+              user.save().then(() => {
+                bot.sendMessage(msg.chat.id, "You're verified, you won't be kicked from groups which you meet the requirement.")
+              }).catch(() => {
+                bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
+              })
+            }
+          })
+        }).catch(() => {
+          bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
+        })
+      }
+    })
   } else {
-    bot.sendMessage(msg.chat.id, 'Checking your signature.')
-    let verify = bitcoinMessage.verify(user.challenge, bitcoin.networks.bitcoin.messagePrefix, user.address, msg.text.trim())
-    if (verify) {
-      user.last_verify = Date.now()
-      user.save().then(() => {
-        bot.sendMessage(msg.chat.id, "You're verified, you won't be kicked from groups which you meet the requirement.")
-      }).catch(() => {
-        bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
-      })
+    if (!user.address) {
+      try {
+        let addr = msg.text.trim()
+        bitcoin.address.fromBase58Check(addr)
+
+        randomString((err, s) => {
+          if (err) {
+            bot.sendMessage(msg.chat.id, 'There was an error generating the challenge. Try again later.')
+          } else {
+            user.address = msg.text.trim()
+            user.challenge = s
+            user.last_verify = 0
+            user.save().then(() => {
+              bot.sendMessage(msg.chat.id, "Now sign the following message and send the result to me.")
+              bot.sendMessage(msg.chat.id, user.challenge)
+            }).catch(() => {
+              bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
+            })
+
+          }
+        })
+      } catch(e) {
+        console.log(e)
+        bot.sendMessage(msg.chat.id, "First send me your address")
+      }
     } else {
-      bot.sendMessage(msg.chat.id, "Bad signature, try again.")
+      bot.sendMessage(msg.chat.id, 'Checking your signature.')
+      let verify = bitcoinMessage.verify(user.challenge, bitcoin.networks.bitcoin.messagePrefix, user.address, msg.text.trim())
+      if (verify) {
+        user.last_verify = Date.now()
+        user.save().then(() => {
+          bot.sendMessage(msg.chat.id, "You're verified, you won't be kicked from groups which you meet the requirement.")
+        }).catch(() => {
+          bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
+        })
+      } else {
+        bot.sendMessage(msg.chat.id, "Bad signature, try again.")
+      }
     }
   }
 }

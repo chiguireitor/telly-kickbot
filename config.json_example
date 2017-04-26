@@ -2,8 +2,11 @@
   "token": "your token, create with @BotFather",
   "sqlite": {
     "dialect": "sqlite",
-    "storage": "path to your sqlite address, "
+    "storage": "path to your sqlite database",
+    "logging": false
   },
+  "authUrl": "https://cryptoauthproxy-esgzbkdecg.now.sh/",
+  "wsAuthUrl": "wss://cryptoauthproxy-esgzbkdecg.now.sh/register",
   "secondsVerify": 30,
   "maxSecondsWithoutVerify": 900
 }
