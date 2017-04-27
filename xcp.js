@@ -17,6 +17,8 @@
 const getJSON = require('get-json')
 const xcpAPI = 'https://counterpartychain.io/api/'
 
+var currentBlock = 0
+
 function getAsset(asset) {
   asset = asset.trim()
   return new Promise((resolve,reject) => {
@@ -38,19 +40,37 @@ function getAssetHolders(asset) {
   asset = asset.trim()
   return new Promise((resolve,reject) => {
     if (asset.length <= 12) {
-      getJSON(xcpAPI + 'holders/' + asset, function(error, response){
-        if (error) {
-          reject(error)
-        } else {
-          let holders = {}
-          response.data.forEach((holder) => {
-            let tb = {}
-            tb[asset] = parseFloat(holder.amount)
-            holders[holder.address] = tb
-          })
-          resolve(holders)
-        }
-      })
+      let page = 1
+      let processed = 0
+      let total = 1
+      let holders = {}
+
+      function getPage() {
+        getJSON(xcpAPI + 'holders/' + asset + '/' + page, function(error, response){
+          console.log('Getting page ' + page + ' for asset ' + asset)
+          if (error) {
+            reject(error)
+          } else {
+            total = parseInt(response.total)
+            response.data.forEach((holder) => {
+              let tb = {}
+              tb[asset] = parseFloat(holder.amount)
+              holders[holder.address] = tb
+            })
+            processed += response.data.length
+
+            page++
+
+            if (processed < total) {
+              getPage()
+            } else {
+              resolve(holders)
+            }
+          }
+        })
+      }
+
+      getPage()
     } else {
       reject(new Error('Assets must be 12 characters or less'))
     }
@@ -101,9 +121,29 @@ function getUser(addr) {
   })
 }
 
+function hasNewBlock() {
+  return new Promise((resolve, reject) => {
+    getJSON('http://public.coindaddy.io:4100/', function(error, response){
+      if (!error) {
+        let lastbi = response.counterblock_last_processed_block.block_index
+
+        if (currentBlock < lastbi) {
+          currentBlock = lastbi
+          resolve({isNew: true, height: lastbi})
+        } else {
+          resolve({isNew: false, height: lastbi})
+        }
+      } else {
+        reject(error)
+      }
+    })
+  })
+}
+
 module.exports = {
   getAsset,
   getAssetHolders,
   getUserBalance,
-  getUser
+  getUser,
+  hasNewBlock
 }

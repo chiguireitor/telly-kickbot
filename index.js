@@ -33,33 +33,39 @@ const tgToken = process.env.TELEGRAM_TOKEN || config.token
 const ownId = parseInt(tgToken.split(':')[0])
 
 var User = sequelize.define('user', {
-  tid: Sequelize.STRING,
+  tid: {type: Sequelize.STRING, primaryKey: true},
   address: Sequelize.STRING,
   challenge: Sequelize.STRING,
   last_verify: Sequelize.DATE
 })
 
 var Group = sequelize.define('group', {
-  tid: Sequelize.STRING,
+  tid: {type: Sequelize.STRING, primaryKey: true},
   token: Sequelize.STRING,
   min_hold: { type: Sequelize.INTEGER, allowNull: false, defaultValue: 1}
 })
 
 var GroupUser = sequelize.define('group_user', {
-  group_id: Sequelize.INTEGER,
-  user_id: Sequelize.INTEGER,
-  group_tid: Sequelize.STRING,
-  user_tid: Sequelize.STRING,
+  group_tid: {type: Sequelize.STRING, primaryKey: true},
+  user_tid: {type: Sequelize.STRING, primaryKey: true},
   join_date: {type: Sequelize.DATE, defaultValue: Sequelize.NOW}
 })
 
-GroupUser.hasOne(User, {foreignKey: 'user_id'})
-User.hasMany(GroupUser, {})
-GroupUser.hasOne(Group, {foreignKey: 'group_id'})
+var BannedGroupUser = sequelize.define('banned_group_user', {
+  group_tid: {type: Sequelize.STRING, primaryKey: true},
+  user_tid: {type: Sequelize.STRING, primaryKey: true}
+})
+
+GroupUser.hasOne(User, {foreignKey: 'user_tid'})
+//User.hasMany(GroupUser, {})
+GroupUser.hasOne(Group, {foreignKey: 'group_tid'})
+BannedGroupUser.hasOne(User, {foreignKey: 'user_tid'})
+BannedGroupUser.hasOne(Group, {foreignKey: 'group_tid'})
 
 User.sync()
 Group.sync()
 GroupUser.sync()
+BannedGroupUser.sync()
 
 const bot = new Tgfancy(tgToken, {
   polling: true,
@@ -75,37 +81,50 @@ bot.getMe().then((data)=> {
   console.log(util.inspect(data, {colors: true, depth: 4}))
 })
 
-function removeUserGroup(uid, gid) {
-  sequelize.transaction(function (trans) {
+function removeUserGroup(uid, gid, prevTran) {
+  let onTrans = function (trans) {
     return GroupUser.destroy({
         where: {group_tid: gid, user_tid: uid},
         transaction: trans
-      }).then(User.destroy({
-        where: {tid: uid},
+      }).then(BannedGroupUser.findOrCreate({
+        where: {group_tid: gid, user_tid: uid},
+        defaults: {group_tid: gid, user_tid: uid},
         transaction: trans
       })).catch((err) => {
         console.log('Error'.bgRed.yellow, err)
       })
-    })
+    }
+
+  if (prevTran) {
+    onTrans(prevTran)
+  } else {
+    sequelize.transaction(onTrans)
+  }
 }
 
 bot.on('message', (msg) => {
-  if (msg.new_chat_member && (msg.new_chat_member.id !== ownId)) {
+  console.log(util.inspect(msg, {colors: true, depth: 3}))
+  let memberId = msg.new_chat_member?msg.new_chat_member.id:(msg.from?msg.from.id:null)
+  let memberName = msg.new_chat_member?msg.new_chat_member.first_name:(msg.from?msg.from.first_name:null)
+  if (memberId !== ownId) {
+    //console.log(msg, 'using member id', memberId)
     sequelize.transaction(function (trans) {
       return GroupUser.findOrCreate({
-          where: {group_tid: msg.chat.id, user_tid: msg.new_chat_member.id},
-          defaults: {group_tid: msg.chat.id, user_tid: msg.new_chat_member.id},
+          where: {group_tid: msg.chat.id, user_tid: memberId},
+          defaults: {group_tid: msg.chat.id, user_tid: memberId},
           transaction: trans
-        }).then(User.findOrCreate({
-          where: {tid: msg.new_chat_member.id},
-          defaults: {tid: msg.new_chat_member.id},
-          transaction: trans
-        })).then(Group.findOrCreate({
+        }).then(() => Group.findOrCreate({
           where: {tid: msg.chat.id},
           defaults: {tid: msg.chat.id},
           transaction: trans
-        })).then(() => {
-          bot.sendMessage(msg.chat.id, 'Hello ' + msg.new_chat_member.first_name +'! PM me or get kicked, you have 15 minutes to act.')
+        })).then(() => User.findOrCreate({
+          where: {tid: memberId},
+          defaults: {tid: memberId},
+          transaction: trans
+        })).then(([usr, created]) => {
+          if (created) {
+            bot.sendMessage(msg.chat.id, 'Hello ' + memberName +'! PM me or get kicked, you have 15 minutes to act.')
+          }
         }).catch((err) => {
           console.log('Error'.bgRed.yellow, err)
         })
@@ -165,9 +184,8 @@ bot.onText(/\/token(.*)/, (msg, token) => {
               })
             }
           })
-          .then(([group], created) => {
+          .then(([group, created]) => {
             if (!created) {
-              //console.log(util.inspect(group, {colors: true, depth: 3}))
               group.token = currentAsset
               return group.save()
             } else {
@@ -276,6 +294,27 @@ bot.onText(/\/start/, (msg) => {
   }
 })
 
+bot.onText(/\/unlink/, (msg) => {
+  const chatId = msg.chat.id
+
+  if (!msg.group) {
+    User.findAll({where: {tid: msg.chat.id}})
+      .then(([user]) => {
+        user.address = 0
+        user.challenge = 0
+        user.last_verify = 0
+        return user.save()
+      })
+      .then(() => {
+        bot.sendMessage(chatId, "Address unlinked")
+      })
+      .catch((e) => {
+        console.log(e)
+        bot.sendMessage(chatId, "Something bad happened")
+      })
+  }
+})
+
 function randomString(cb) {
   crypto.randomBytes(10, function(err, buffer) {
     if (err) {
@@ -297,10 +336,10 @@ if (config.wsAuthUrl) {
       let ob = JSON.parse(data)
 
       if ('verified' in ob) {
-        challengeWaits[ob.challenge](true)
+        challengeWaits[ob.challenge](ob)
       }
     } catch (e) {
-      console.log('Malformed data from websocket')
+      console.log('Malformed data from websocket', e)
     }
   })
 
@@ -315,31 +354,45 @@ if (config.wsAuthUrl) {
 
 function handleUserMessage(msg, user) {
   if (config.authUrl) {
-    randomString((err, s) => {
-      if (err) {
-        bot.sendMessage(msg.chat.id, 'There was an error generating the challenge. Try again later.')
-      } else {
-        user.address = msg.text.trim()
-        user.challenge = s
-        user.last_verify = 0
-        user.save().then(() => {
-          bot.sendMessage(msg.chat.id, "Go to the following link to verify your address.")
-          bot.sendMessage(msg.chat.id, "https://rarepepewallet.com/?msg=" + user.challenge + "&return=" + config.authUrl)
-          waitChallenge(user.challenge, (verified) => {
-            if (verified) {
-              user.last_verify = Date.now()
-              user.save().then(() => {
-                bot.sendMessage(msg.chat.id, "You're verified, you won't be kicked from groups which you meet the requirement.")
-              }).catch(() => {
-                bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
+    if (user.address && (user.address != '0')) {
+      bot.sendMessage(msg.chat.id, 'You\'re all set, issue /unlink to remove your address from your user.')
+    } else {
+      randomString((err, s) => {
+        if (err) {
+          bot.sendMessage(msg.chat.id, 'There was an error generating the challenge. Try again later.')
+        } else {
+          user.challenge = s
+          user.last_verify = 0
+          user.save().then(() => {
+            bot.sendMessage(msg.chat.id, "Go to the following link to verify your address.", {
+              reply_markup: JSON.stringify({
+                inline_keyboard: [
+                  [{
+                    text: 'Verify on rarepepewallet.com',
+                    url: "https://rarepepewallet.com/?msg=" + user.challenge + "&return=" + encodeURIComponent(config.authUrl)
+                  }]
+                ]
               })
-            }
+            })
+
+            waitChallenge(user.challenge, (data) => {
+              if (data && (data.challenge == user.challenge)) {
+                user.address = data.verified
+                user.last_verify = Date.now()
+                user.save().then(() => {
+                  bot.sendMessage(msg.chat.id, "You're verified, you won't be kicked from groups which you meet the requirement.")
+                }).catch(() => {
+                  bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
+                })
+              }
+            })
+          }).catch((err) => {
+            console.log(err)
+            bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
           })
-        }).catch(() => {
-          bot.sendMessage(msg.chat.id, 'There was an error saving user data. Try again later.')
-        })
-      }
-    })
+        }
+      })
+    }
   } else {
     if (!user.address) {
       try {
@@ -383,127 +436,354 @@ function handleUserMessage(msg, user) {
   }
 }
 
-setInterval(() => {
-  let checks = {}
-  let addrToUid = {}
-  let bans = []
+var cachedGroups
+function gatherGroups() {
+  if (cachedGroups) {
+    return cachedGroups
+  } else {
+    return Group.findAll()
+      .then((groups) => {
+        let grps = groups.reduce((o, i) => {
+          if (i.token) {
+            if (!(i.token in o)) {
+              o[i.token] = []
+            }
 
-  function includeCheck(addr, uid, token, gid, amnt) {
-    if (!(addr in checks)) {
-      checks[addr] = {}
-    }
+            o[i.token].push({
+              tid: i.tid,
+              token: i.token,
+              min_hold: i.min_hold,
+              members: [],
+              kicked: []
+            })
+          }
+          return o
+        }, {})
 
-    if (!(token in checks[addr])) {
-      checks[addr][token] = []
-    }
+        return Promise.all([
+          grps,
+          GroupUser.findAll(),
+          BannedGroupUser.findAll()
+        ])
+      })
+      .then(([grps, gusers, bgusers]) => {
+        let proc = (cat) => (item) => {
+          for (let token in grps) {
+            let g = grps[token].find((fg) => fg.tid == item.group_tid)
 
-    checks[addr][token].push({gid, amnt, uid})
-    addrToUid[addr] = uid
-  }
-
-  function checkBals(addr, bals, uid) {
-    if (addr in checks) {
-      let chk = checks[addr]
-
-      for (let token in chk) {
-        let grps = chk[token]
-
-        if (token in bals) {
-          for (let i=0; i < grps.length; i++) {
-            if (grps[i].amnt > bals[token]) {
-              bans.push({
-                gid: grps[i].gid,
-                uid,
-                addr
+            if (g) {
+              g[cat].push({
+                address: null,
+                tid: item.user_tid,
+                join_date: item.join_date
               })
             }
           }
-        } else {
-          for (let i=0; i < grps.length; i++) {
-            bans.push({
-              gid: grps[i].gid,
-              uid,
-              addr
+        }
+
+        gusers.forEach(proc('members'))
+        bgusers.forEach(proc('kicked'))
+
+        return Promise.all([
+          grps,
+          User.findAll()
+        ])
+      })
+      .then(([grps, users]) => {
+        let searchByTid = tid => x => x.tid === tid
+
+        users.forEach((user) => {
+          for (let token in grps) {
+            grps[token].forEach((group) => {
+              group.members
+                .filter(searchByTid(user.tid))
+                .forEach(gm => {gm.address = user.address})
+              group.kicked
+                .filter(searchByTid(user.tid))
+                .forEach(gm => {gm.address = user.address})
             })
           }
-        }
-      }
-    }
+        })
+
+        return grps
+      })
   }
+}
 
-  GroupUser.findAll({include: [User, Group]}).then((grusrs) => {
-    let gets = []
-    for (let i=0; i < grusrs.length; i++) {
-      let grusr = grusrs[i]
+function forEachMemberInEachGroup(groups, category, filter) {
+  for (let token in groups) {
+    groups[token].forEach(group => {
+      let list = group[category]
 
-      //console.log('Getting usr:', grusr.user_tid, 'grp:', grusr.group_tid)
-
-      gets.push(Promise.all([
-        User.find({where: {tid: grusr.user_tid}}),
-        Group.find({where: {tid: grusr.group_tid}}),
-        grusr
-      ]))
-    }
-    return Promise.all(gets)
-  }).then((usrGrps) => {
-    let users = []
-    let gets = []
-    let orderedAssets = []
-    let assets = {}
-
-    for (let i=0; i < usrGrps.length; i++) {
-      let usr = usrGrps[i][0]
-      let grp = usrGrps[i][1]
-      let grusr = usrGrps[i][2]
-
-      if  (usr) {
-        if (!usr.last_verify) {
-          let start = moment(Date.now())
-          let end = moment(grusr.join_date)
-          let diff = start.diff(end)
-
-          if (diff > (config.maxSecondsWithoutVerify * 1000)) {
-            bans.push({
-              gid: grp.tid,
-              uid: usr.tid,
-              addr: usr.address
-            })
-          }
-        } else {
-          includeCheck(usr.address, usr.tid, grp.token, grp.tid, grp.min_hold)
-          assets[grp.token] = true
-          users.push({address: usr.address, tid: usr.tid}) //xcp.getUser(usr.address))
-        }
+      if (list) {
+        list.forEach(user => {
+          filter(token, group, user)
+        })
       }
-    }
+    })
+  }
+}
 
-    for (let token in assets) {
-      gets.push(xcp.getAssetHolders(token))
-      orderedAssets.push(token)
-    }
+function generateTimeBans(groups) {
+  let bans = []
 
+  forEachMemberInEachGroup(groups, 'members', (token, group, user) => {
+    if (!user.createdAt) {
+      bans.push({gid: group.tid, uid: user.tid, reason: 'no-date', detail: {}})
+    } else {
+      let start = moment(Date.now())
+      let end = moment(user.createdAt)
+      let diff = start.diff(end)
 
-    return Promise.all(gets)
-  }).then((chckds) => {
-    let holders = chckds.reduce((p, n) => merge(p, n), {})
-
-    for (let i=0; i < holders.length; i++) {
-      for (let addr in holders[i]) {
-        let bals = holders[i][addr]
-        checkBals(addr, bals, addrToUid[addr])
-      }
-    }
-
-    for (let i=0; i < bans.length; i++) {
-      let ban = bans[i]
-      if (ban.uid != ownId) {
-        console.log('KICK'.bgRed.yellow, ban.addr)
-        bot.kickChatMember(ban.gid, ban.uid)
-        removeUserGroup(ban.uid, ban.gid)
+      if ((diff > (config.maxSecondsWithoutVerify * 1000)) && !user.address) {
+        bans.push({gid: group.tid, uid: user.tid, reason: 'validate-timeout', detail: {}})
       }
     }
   })
-}, 1000 * config.secondsVerify)
+
+  return bans
+}
+
+function generateTokenBans(groups, holders) {
+  let bans = []
+  forEachMemberInEachGroup(groups, 'members', (token, group, user) => {
+    if (user.address) {
+      if (!(user.address in holders)) {
+        console.log('No-token data:', group.tid, user.tid, user.address, group.token)
+        bans.push({gid: group.tid, uid: user.tid, reason: 'no-token', detail: {token: group.token}})
+      } else {
+        let holdings = holders[user.address]
+        if (!(group.token in holdings)) {
+          console.log('No-token:', group.tid, user.tid, user.address, group.token)
+          bans.push({gid: group.tid, uid: user.tid, reason: 'no-token', detail: {token: group.token}})
+        } else {
+          let balance = holdings[group.token]
+
+          if (balance < group.min_hold) {
+            console.log('No-min_hold:', group.tid, user.tid, user.address, group.token)
+            bans.push({gid: group.tid, uid: user.tid, reason: 'no-min_hold', detail: {token: group.token, hold: group.min_hold}})
+          }
+        }
+      }
+    }
+  })
+
+  return bans
+}
+
+function generateTokenUnbans(groups, holders) {
+  let unbans = []
+  forEachMemberInEachGroup(groups, 'kicked', (token, group, user) => {
+    if (user.address in holders) {
+      let holdings = holders[user.address]
+      if (group.token in holdings) {
+        let balance = holdings[group.token]
+
+        if (balance >= group.min_hold) {
+          unbans.push({gid: group.tid, uid: user.tid, reason: 'good-balance', detail: {token: group.token, hold: group.min_hold}})
+        }
+      }
+    }
+  })
+
+  return unbans
+}
+
+var cachedHolders
+function getAllHolders(height, tokens) {
+  const heightFilename = './lastHoldersHeight'
+  const dataFilename = './lastHoldersData'
+  return new Promise((resolve, reject) => {
+    function download() {
+      console.log('Downloading new holder list')
+      Promise.all(tokens.map(token => xcp.getAssetHolders(token)))
+        .then((tokens) => {
+          cachedHolders = tokens.reduce((p, n) => merge.recursive(true, p, n), {})
+
+          fs.writeFile(dataFilename, JSON.stringify(cachedHolders), (err) => {
+            if (err) {
+              resolve(cachedHolders)
+            } else {
+              fs.writeFile(heightFilename, ""+height, () => {
+                resolve(cachedHolders)
+              })
+            }
+          })
+        })
+    }
+
+    fs.readFile(heightFilename, (err, data) => {
+      if (err) {
+        console.log('No height data for cached holders')
+        download()
+      } else {
+        let fh = parseInt(data.toString())
+
+        console.log('Previous height data, checking', fh, '=', height)
+
+        if (fh === height) {
+          fs.readFile(dataFilename, (err, data) => {
+            if (err) {
+              console.log('Error while reading cached holders')
+              download()
+            } else {
+              console.log('Parsing cached holders data')
+              cachedHolders = JSON.parse(data.toString('utf8'))
+
+              resolve(cachedHolders)
+            }
+          })
+        } else {
+          console.log('Stale cache for holders')
+          download()
+        }
+      }
+    })
+  })
+}
+
+function processBan(ban, transaction) {
+  console.log(ban)
+  return bot.kickChatMember(ban.gid, ban.uid)
+    .then(removeUserGroup(ban.uid, ban.gid, transaction))
+    .then(() => {
+    let usrMessage, groupMessage
+    if (ban.reason === 'no-token') {
+      usrMessage =
+        'Just banned you from a group because you don\'t meet the criteria:\n' +
+        ' * You need to hold ' + ban.detail.token + '\n' +
+        'Unfortunately, i don\'t know the group name :('
+
+      groupMessage = 'Kicked that last one because he/she doesn\'t holds any of ' + ban.detail.token
+    } else if (ban.reason === 'no-min_hold') {
+      usrMessage =
+        'Just banned you from a group because you don\'t meet the criteria:\n' +
+        ' * You need at least' + ban.detail.hold + ' of ' + ban.detail.token + '\n' +
+        'Unfortunately, i don\'t know the group name :('
+
+      groupMessage = 'Kicked that last one because he/she doesn\'t holds enough ' + ban.detail.token
+    } else if (ban.reason === 'no-date') {
+      usrMessage = 'It seems i didn\'t see you join a group when i was coded well, sorry'
+      groupMessage = 'That last one joined and i was badly coded, my bad'
+    } else if (ban.reason === 'validate-timeout') {
+      usrMessage = 'You failed to validate in time, whenever you validate you\'ll gain access to the groups you want'
+      groupMessage = 'That last one didn\'t validate on time'
+    } else {
+      usrMessage = 'Sorry, banned you for an unknown reason'
+      groupMessage = 'I felt like kicking someone (reason unknonw)'
+    }
+
+    let msgs = []
+
+    if (usrMessage) {
+      msgs.push(bot.sendMessage(ban.uid, usrMessage))
+    }
+
+    if (groupMessage) {
+      msgs.push(bot.sendMessage(ban.gid, groupMessage))
+    }
+
+    return Promise.all(msgs)
+  }).catch((err) => {
+    if (err.message.indexOf('USER_NOT_PARTICIPANT') >= 0) {
+      // User is not there, remove
+      return removeUserGroup(ban.uid, ban.gid, transaction)
+    } else if (err.message.indexOf('not enough rights') >= 0) {
+      return bot.sendMessage(ban.gid, 'Hey admin! You should give me admin rights here')
+    } else if (err.message.indexOf('USER_ADMIN_INVALID') >= 0) {
+      console.log('Tried to kick an admin at', ban.gid, ban.uid)
+      bot.getChatMember(ban.gid, ban.uid)
+        .then((user) => {
+          console.log('This was the one i tried to ban', user)
+        })
+    }
+  })
+}
+
+function processUnban(unban, transaction) {
+  console.log(unban)
+  return bot.unbanChatMember(unban.gid, unban.uid)
+    .then(BannedGroupUser.destroy({
+      where: {group_tid: unban.gid, user_tid: unban.uid},
+      transaction
+    }))
+    .then(([num]) => {
+
+    let usrMessage, groupMessage
+    let msgs = []
+    if (num === 1) {
+      if (unban.reason === 'good-balance') {
+        usrMessage =
+          'Just unbanned you from a group because you meet the criteria:\n' +
+          ' * You have at least ' + unban.detail.hold + ' of ' + unban.detail.token + '\n' +
+          'Unfortunately, i don\'t know the group name :('
+
+        groupMessage = 'Just unbanned someone... don\'t know his/her name... sorry'
+      }
+
+      if (usrMessage) {
+        msgs.push(bot.sendMessage(unban.uid, usrMessage))
+      }
+
+      if (groupMessage) {
+        msgs.push(bot.sendMessage(unban.gid, groupMessage))
+      }
+    } else {
+      msgs.push(bot.sendMessage(unban.uid, 'Tried to unban you, but it didn\'t work. Sorry.'))
+    }
+
+    return Promise.all(msgs)
+  }).catch((err) => {
+    if (err.message.indexOf('USER_NOT_PARTICIPANT') >= 0) {
+      // User is not there, remove
+      //removeUserGroup(ban.uid, ban.gid, transaction)
+      return BannedGroupUser.destroy({
+        where: {group_tid: unban.gid, user_tid: unban.uid},
+        transaction
+      })
+    } else if (err.message.indexOf('not enough rights') >= 0) {
+      return bot.sendMessage(unban.gid, 'Hey admin! You should give me admin rights here')
+    } else if (err.message.indexOf('USER_ADMIN_INVALID') >= 0) {
+      console.log('Tried to kick an admin at ' + unban.gid)
+    }
+  })
+}
+
+function processBotAndDBActions(bans, unbans) {
+  return sequelize.transaction((transaction) => {
+    return Promise.all(
+      bans.map(ban => processBan(ban, transaction)).concat(
+      unbans.map(unban => processUnban(unban, transaction))
+    ))
+  })
+}
+
+function wholeCheck() {
+  Promise.all([xcp.hasNewBlock(), gatherGroups()])
+    .then(([{isNew, height}, groups]) => {
+      if (isNew) {
+        return Promise.all([groups, getAllHolders(height, Object.keys(groups))])
+      } else {
+        return [groups, cachedHolders]
+      }
+    })
+    .then(([groups, holders]) => {
+      let timeBans = generateTimeBans(groups)
+      let tokenBans = generateTokenBans(groups, holders)
+      let bans = timeBans.concat(tokenBans)
+
+      let unbans = generateTokenUnbans(groups, holders)
+
+      return processBotAndDBActions(bans, unbans)
+    })
+    .catch((err) => {
+      console.log(err)
+      throw err
+    })
+}
+
+setTimeout(wholeCheck, 2000)
+setInterval(wholeCheck, 1000 * config.secondsVerify)
 
 function searchGroups() {
   sequelize.transaction(function (trans) {
