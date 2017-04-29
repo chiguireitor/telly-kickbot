@@ -329,23 +329,33 @@ var challengeWaits = {}
 var waitChallenge = function() {}
 
 if (config.wsAuthUrl) {
-  const ws = new WebSocket(config.wsAuthUrl)
+  var ws
 
-  ws.on('message', function incoming(data, flags) {
-    try {
-      let ob = JSON.parse(data)
+  function connectWs() {
+    ws = new WebSocket(config.wsAuthUrl)
 
-      if ('verified' in ob) {
-        challengeWaits[ob.challenge](ob)
+    ws.on('message', function incoming(data, flags) {
+      try {
+        let ob = JSON.parse(data)
+
+        console.log('Websocket info', util.inspect(ob))
+
+        if ('verified' in ob) {
+          challengeWaits[ob.challenge](ob)
+        }
+      } catch (e) {
+        console.log('Malformed data from websocket', e)
       }
-    } catch (e) {
-      console.log('Malformed data from websocket', e)
-    }
-  })
+    })
+
+    ws.on('close', connectWs)
+  }
+  connectWs()
 
   waitChallenge = function(chall, cb) {
     challengeWaits[chall] = cb
 
+    console.log('Sending challenge', chall)
     ws.send(JSON.stringify({
       challenge: chall
     }))
@@ -370,7 +380,11 @@ function handleUserMessage(msg, user) {
                   [{
                     text: 'Verify on rarepepewallet.com',
                     url: "https://rarepepewallet.com/?msg=" + user.challenge + "&return=" + encodeURIComponent(config.authUrl)
-                  }]
+                  }/*,
+                  {
+                    text: "Verify on IndieSquare",
+                    url: "https://cryptoauthproxy-rwayxwtfhk.now.sh/indiesquare?msg=" + user.challenge + "&x-success=" + encodeURIComponent(config.authUrl)
+                  }*/]
                 ]
               })
             })
@@ -529,7 +543,7 @@ function generateTimeBans(groups) {
 
   forEachMemberInEachGroup(groups, 'members', (token, group, user) => {
     if (!user.createdAt) {
-      bans.push({gid: group.tid, uid: user.tid, reason: 'no-date', detail: {}})
+      //bans.push({gid: group.tid, uid: user.tid, reason: 'no-date', detail: {}})
     } else {
       let start = moment(Date.now())
       let end = moment(user.createdAt)
