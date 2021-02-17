@@ -13,4 +13,6 @@ Usage:
 
 For production use, run with `pm2` or any other supervisor.
 
+You'll probably need a https://github.com/chiguireitor/cryptoauthproxy instance running for it to work correctly.
+
 Have a request, need a feature? @chiguireitor on telegram to ask.
